@@ -141,13 +141,12 @@ def gemini_analyze(image_path: Path, country: str, forbid_zoomin: bool = False, 
         '"findings":[string,...],'
         '"analysis":string,'
         '"things_to_continue_analyzing":[string,...],'
-        '"action":"zoom-in"|"zoom-out"|"move-north"|"move-south"|"move-east"|"move-west"|"finish"'
+        '"action":"zoom-in"|"zoom-out"|"move-north"|"move-south"|"move-east"|"move-west"'
         '}\n\n'
         "ACTION GUIDANCE:\n"
         '  • "zoom-in"  – need finer details;\n'
         '  • "zoom-out" – need broader context;\n'
         '  • "move-north/south/east/west" – likely features just outside the current frame;\n'
-        '  • "finish"   – analysis complete.\n\n'
         "OUTPUT RULES: valid JSON only, double quotes, no markdown or commentary outside the object.\n"
         "If you believe we are ALREADY at the closest useful zoom, DO NOT ask for \"zoom-in\"; choose a different action instead.\n"
         "DO NOT wrap the JSON in back-ticks or code fences."

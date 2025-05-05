@@ -15,13 +15,25 @@ from selenium.webdriver.chrome.service import Service as ChromeService
 from webdriver_manager.chrome import ChromeDriverManager
 import google.generativeai as genai
 import json
+from openai import OpenAI
 
 load_dotenv()     
 if not os.getenv("GOOGLE_API_KEY"):
-    sys.exit("GOOGLE_API_KEY not set - aborting.")                               
+    sys.exit("GOOGLE_API_KEY not set - aborting.")
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 MODEL_ID = "gemini-2.0-flash-exp-image-generation"  
 model = genai.GenerativeModel(MODEL_ID)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+if not OPENROUTER_API_KEY:
+    sys.exit("OPENROUTER_API_KEY not set!")
+router_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
+
+# choose the Microsoft reasoning model
+REASONING_MODEL = "microsoft/mai-ds-r1:free"                           
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -154,11 +166,6 @@ def gemini_analyze(image_path: Path, country: str, forbid_zoomin: bool = False, 
     return response.text.strip()
 
 
-
-# ---------------------------------------------------------------------------
-# Core logic
-# ---------------------------------------------------------------------------
-
 def process_csv(csv_path: Path) -> None:
     df = pd.read_csv(csv_path)
     ensure_dir()
@@ -253,9 +260,52 @@ def process_csv(csv_path: Path) -> None:
                 elif action == "move-west":
                     current_lon -= PAN_DEG
                 # 'finish' → leave camera unchanged
+                
+            final_report = generate_commander_report(analyst_history)
+            print("\n=== FINAL COMMANDER REPORT ===")
+            print(final_report)
 
     finally:
         driver.quit()
+        
+def generate_commander_report(analyst_history: list[str]) -> str:
+    """
+    Given the 8 analysts' JSON strings, synthesize a final commander report via OpenRouter.
+    """
+    # 1) Build the combined history block
+    history_block = "\n\n".join(analyst_history)
+
+    # 2) Commander‐style system prompt
+    commander_prompt = f"""
+You are a commander of military analysts and you are investigating a suspected enemy facility.
+Here is the history of what eight different analysts reported (each written independently):
+
+{history_block}
+
+
+YOUR TASK:
+1. Write a concise **executive summary** of the site.
+2. Identify the **three most critical military assets or patterns** observed.
+3. Provide a **threat assessment** describing possible enemy capabilities.
+4. Recommend **next steps** (e.g., reconnaissance actions, target priorities, security measures).
+5. Conclude with a **final recommendation**: choose one of [attack, monitor, recon, dismiss].
+
+Present your answer as a **professional briefing** in **plain text**, using paragraphs and bullet points—not JSON. 
+"""
+
+    # 3) Call the OpenRouter chat endpoint
+    resp = router_client.chat.completions.create(
+        model=REASONING_MODEL,
+        messages=[
+            {"role": "system", "content": commander_prompt},
+            {"role": "user",   "content": "Please draft a professional, narrative briefing in plain text—no JSON."}
+        ],
+        temperature=0.2,
+        max_tokens=1024,
+    )
+
+    return resp.choices[0].message.content.strip()
+
 
 # ---------------------------------------------------------------------------
 # CLI

@@ -41,7 +41,7 @@ SCREENSHOTS_DIR  = Path("screenshots")
 current_lat: float | None = None
 current_lon: float | None = None
 current_range_m           = DISTANCE_M   # starting zoom range
-PAN_DEG    = 0.0008
+PAN_DEG    = 0.0003
 ZOOM_FACTOR = 0.5
 MIN_RANGE_M = 450
 LLM_RETRY_ON_FORBIDDEN_ZOOMIN = True
@@ -110,7 +110,7 @@ def safe_print_saved(path: Path) -> None:
     except ValueError:
         print(f"[✓] Saved {path}")
         
-def gemini_analyze(image_path: Path, country: str, forbid_zoomin: bool = False) -> str:
+def gemini_analyze(image_path: Path, country: str, forbid_zoomin: bool = False, history: list[str] = []) -> str:
     note = ""
     if forbid_zoomin:
         note = (
@@ -118,6 +118,41 @@ def gemini_analyze(image_path: Path, country: str, forbid_zoomin: bool = False) 
             "You are NOT allowed to respond with 'zoom-in'. Choose one of: "
             "'zoom-out', 'move-north', 'move-south', 'move-east', 'move-west', or 'finish'.\n\n"
         )
+    prompt = note + (
+        "You are an expert in satellite-imagery interpretation working for the US Army.\n\n"
+        "TASK:\n"
+        f"  • You receive a satellite image of a suspected {country} military facility.\n"
+        "  • Respond WITH NOTHING BUT a single, minified JSON object that matches the schema below.\n\n"
+        "SCHEMA:\n"
+        '{'
+        '"findings":[string,...],'
+        '"analysis":string,'
+        '"things_to_continue_analyzing":[string,...],'
+        '"action":"zoom-in"|"zoom-out"|"move-north"|"move-south"|"move-east"|"move-west"|"finish"'
+        '}\n\n'
+        "ACTION GUIDANCE:\n"
+        '  • "zoom-in"  – need finer details;\n'
+        '  • "zoom-out" – need broader context;\n'
+        '  • "move-north/south/east/west" – likely features just outside the current frame;\n'
+        '  • "finish"   – analysis complete.\n\n'
+        "OUTPUT RULES: valid JSON only, double quotes, no markdown or commentary outside the object.\n"
+        "If you believe we are ALREADY at the closest useful zoom, DO NOT ask for \"zoom-in\"; choose a different action instead.\n"
+        "DO NOT wrap the JSON in back-ticks or code fences."
+    )
+
+    if history:
+        prompt += (
+            "\n\nHere is the analysis of previous analysts about this area and their recommendations. "
+            "You can use this data but don’t use it as fact, think for yourself:\n"
+            f"{history}\n"
+        )
+
+    with open(image_path, "rb") as img:
+        response = model.generate_content(
+            [prompt, {"mime_type": "image/jpeg", "data": img.read()}]
+        )
+    return response.text.strip()
+
 
     prompt = (
         note +
@@ -176,8 +211,10 @@ def process_csv(csv_path: Path) -> None:
             if current_lat is None:              # first row only
                 current_lat, current_lon = lat, lon
 
+            analyst_history: list[str] = []
             # ----- 8 independent analysts loop -----
             for analyst_idx in range(8):
+                analyst_history = []
                 # 1) Navigate to current camera position
                 driver.get(build_earth_url())
                 time.sleep(LOAD_WAIT_SEC)
@@ -192,7 +229,9 @@ def process_csv(csv_path: Path) -> None:
                 # 3) Gemini call
                 country = str(row.get("country", "unknown"))
                 print(f"[→] Analyst {analyst_idx+1} reviewing image …")
-                report = gemini_analyze(jpg_path, country)
+                history_str = "\n\n".join(analyst_history) if analyst_history else None
+                report = gemini_analyze(jpg_path, country, forbid_zoomin=False, history=history_str)
+                analyst_history.append(report)
                 print(report, "\n")
 
                 # 4) Parse JSON + update camera
@@ -221,21 +260,10 @@ def process_csv(csv_path: Path) -> None:
                     ):
                         print("[INFO] LLM requested zoom-in but already at min zoom → suggesting alternatives")
                         clean = gemini_analyze(jpg_path, country, forbid_zoomin=True).strip()
-                        # Remove ``` if needed
                         if clean.startswith("```"):
                             clean = re.sub(r"^```[\w]*\s*|```$", "", clean).strip()
                         continue  # retry loop
                     break  # exit loop
-
-
-                # ---- auto-override if the image is clearly unusable -----------------
-                analysis_txt = data.get("analysis", "").lower()
-                too_blurry   = ("blurry" in analysis_txt) or ("black" in analysis_txt) or ("low resolution" in analysis_txt)
-                no_findings  = not data.get("findings")
-
-                if action == "zoom-in" and (too_blurry or no_findings or current_range_m <= MIN_RANGE_M):
-                    print("[INFO] Image unusable at this zoom → switching to zoom-out")
-                    action = "zoom-out"
 
 
                 if action == "zoom-in":

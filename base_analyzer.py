@@ -32,13 +32,13 @@ router_client = OpenAI(
 )
 
 # choose the Microsoft reasoning model
-REASONING_MODEL = "microsoft/mai-ds-r1:free"                           
+REASONING_MODEL = "qwen/qwen3-235b-a22b:free"                           
 
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-ROWS_TO_PROCESS  = 1
+ROWS_TO_PROCESS  = 8
 ALTITUDE_M       = 10.0
 DISTANCE_M       = 1800.0
 TILT_DEG         = 30.0
@@ -53,7 +53,7 @@ SCREENSHOTS_DIR  = Path("screenshots")
 current_lat: float | None = None
 current_lon: float | None = None
 current_range_m           = DISTANCE_M   # starting zoom range
-PAN_DEG    = 0.0003
+PAN_DEG    = 0.0006
 ZOOM_FACTOR = 0.5
 MIN_RANGE_M = 450
 LLM_RETRY_ON_FORBIDDEN_ZOOMIN = True
@@ -176,23 +176,22 @@ def process_csv(csv_path: Path) -> None:
 
     service = ChromeService(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
+    global current_lat, current_lon, current_range_m
 
     try:
         for idx, row in df.head(ROWS_TO_PROCESS).iterrows():
             coords = parse_coords(row)
-            if coords is None:
-                print(f"[WARN] Row {idx}: Coordinates not found. Skipping…", file=sys.stderr)
+            if coords is None: # Check if coords were successfully parsed
+                print(f"[WARN] Row {idx+1}: Coordinates not found. Skipping…", file=sys.stderr)
                 continue
-
-            lat, lon = coords
-            global current_lat, current_lon, current_range_m
-            if current_lat is None:              # first row only
-                current_lat, current_lon = lat, lon
+            
+            current_lat, current_lon = coords  # Use the coords parsed from the CURRENT row
+            current_range_m = DISTANCE_M      # Reset zoom to the default start distance
+            print(f"[INFO] Processing Row {idx+1}: Set location to Lat: {current_lat:.6f}, Lon: {current_lon:.6f}, Range: {current_range_m}m") # Optional: Log the update
 
             analyst_history: list[str] = []
             # ----- 8 independent analysts loop -----
             for analyst_idx in range(8):
-                analyst_history = []
                 # 1) Navigate to current camera position
                 driver.get(build_earth_url())
                 time.sleep(LOAD_WAIT_SEC)
@@ -304,7 +303,15 @@ Present your answer as a **professional briefing** in **plain text**, using para
         max_tokens=1024,
     )
 
-    return resp.choices[0].message.content.strip()
+    print(f"\n[DEBUG] OpenRouter Raw Response for Commander:\n{resp}\n")
+    choices = resp.choices
+    if not choices or not choices[0].message or not choices[0].message.content:
+        raise RuntimeError("Commander LLM returned no content")
+    return choices[0].message.content.strip()
+
+
+
+    
 
 
 # ---------------------------------------------------------------------------

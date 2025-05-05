@@ -46,6 +46,7 @@ HEADING_DEG      = 0.0
 LOAD_WAIT_SEC    = 12
 TARGET_WIDTH_PX  = 1024
 SCREENSHOTS_DIR  = Path("screenshots")
+DATA_FILE        = Path("data.json")
 
 # ---------------------------------------------------------------------------
 # Dynamic camera state
@@ -153,10 +154,11 @@ def gemini_analyze(image_path: Path, country: str, forbid_zoomin: bool = False, 
     )
 
     if history:
+        # join each previous report with blank lines
+        hist_block = "\n\n".join(history)
         prompt += (
-            "\n\nHere is the analysis of previous analysts about this area and their recommendations. "
-            "You can use this data but don’t use it as fact, think for yourself:\n"
-            f"{history}\n"
+            "\n\nHere is what previous analysts said (don’t take it as gospel, think for yourself):\n"
+            f"{hist_block}\n"
         )
 
     with open(image_path, "rb") as img:
@@ -167,6 +169,20 @@ def gemini_analyze(image_path: Path, country: str, forbid_zoomin: bool = False, 
 
 
 def process_csv(csv_path: Path) -> None:
+    # --- Load existing data ---
+    if DATA_FILE.exists():
+        try:
+            all_results = json.loads(DATA_FILE.read_text())
+            print(f"[INFO] Loaded {len(all_results)} existing records from {DATA_FILE}")
+        except json.JSONDecodeError:
+            print(f"[WARN] Failed to decode existing {DATA_FILE}. Starting fresh.", file=sys.stderr)
+            all_results: list[dict] = [] # Ensure type hint if file is invalid
+    else:
+        all_results: list[dict] = []
+        print(f"[INFO] {DATA_FILE} not found. Starting fresh.")
+    # Create a set of names for faster lookup
+    processed_base_names = {r.get("name") for r in all_results if r.get("name")}
+    # --- End Load existing data ---
     df = pd.read_csv(csv_path)
     ensure_dir()
 
@@ -180,16 +196,27 @@ def process_csv(csv_path: Path) -> None:
 
     try:
         for idx, row in df.head(ROWS_TO_PROCESS).iterrows():
-            coords = parse_coords(row)
-            if coords is None: # Check if coords were successfully parsed
+            original_coords = parse_coords(row)
+            if original_coords is None: # Check if coords were successfully parsed
                 print(f"[WARN] Row {idx+1}: Coordinates not found. Skipping…", file=sys.stderr)
                 continue
             
-            current_lat, current_lon = coords  # Use the coords parsed from the CURRENT row
+            # --- Create unique base name ---
+            lat_str = f"{original_coords[0]:.5f}".replace('.', 'p')
+            lon_str = f"{original_coords[1]:.5f}".replace('.', 'p')
+            raw_name = str(row.get("name", f"base_lat{lat_str}_lon{lon_str}"))
+            base_name = re.sub(r"[^A-Za-z0-9._-]", "_", raw_name) # Sanitize name
+            # --- Skip if already processed ---
+            if base_name in processed_base_names:
+                print(f"[SKIP] Analysis for '{base_name}' found in {DATA_FILE}. Skipping.")
+                continue
             current_range_m = DISTANCE_M      # Reset zoom to the default start distance
+            current_lat, current_lon = original_coords  # Use the coords parsed from the CURRENT row
             print(f"[INFO] Processing Row {idx+1}: Set location to Lat: {current_lat:.6f}, Lon: {current_lon:.6f}, Range: {current_range_m}m") # Optional: Log the update
-
-            analyst_history: list[str] = []
+            
+        
+            analyst_report_strings: list[str] = []
+            parsed_analyst_reports: list[dict] = []
             # ----- 8 independent analysts loop -----
             for analyst_idx in range(8):
                 # 1) Navigate to current camera position
@@ -206,27 +233,28 @@ def process_csv(csv_path: Path) -> None:
                 # 3) Gemini call
                 country = str(row.get("country", "unknown"))
                 print(f"[→] Analyst {analyst_idx+1} reviewing image …")
-                history_str = "\n\n".join(analyst_history) if analyst_history else None
-                report = gemini_analyze(jpg_path, country, forbid_zoomin=False, history=history_str)
-                analyst_history.append(report)
-                print(report, "\n")
+                # pass the raw list so gemini_analyze can join it itself
+                report_str = gemini_analyze(jpg_path, country, forbid_zoomin=False, history=analyst_report_strings)
+                analyst_report_strings.append(report_str)
+                print(report_str, "\n")
 
                 # 4) Parse JSON + update camera
-                clean = report.strip()
+                clean = report_str.strip()
 
                 # ── Remove ``` fences, e.g. ```json ... ``` or plain ```
                 if clean.startswith("```"):
                     #   ^```       optional language tag   whitespace/newline   …   closing ```
                     clean = re.sub(r"^```[\w]*\s*|```$", "", clean).strip()
 
+                parsed_data = None
                 for attempt in range(2):  # allow 1 retry
                     try:
                         data = json.loads(clean)
                         action = data.get("action", "finish")
+                        parsed_data = data
                     except json.JSONDecodeError:
-                        print("[WARN] Invalid JSON – defaulting to 'finish'")
-                        data = {}
-                        action = "finish"
+                        print(f"[WARN] Analyst {analyst_idx+1} for '{base_name}' returned invalid JSON. Defaulting action to 'finish'.")
+                        parsed_data = {"error": "Invalid JSON response", "raw_response": report_str}
 
                     # If it requested zoom-in but we can't, ask Gemini again with hint
                     if (
@@ -241,6 +269,10 @@ def process_csv(csv_path: Path) -> None:
                             clean = re.sub(r"^```[\w]*\s*|```$", "", clean).strip()
                         continue  # retry loop
                     break  # exit loop
+                
+                # Store the parsed data (or error dict) from the analyst report
+                if parsed_data is not None:
+                    parsed_analyst_reports.append(parsed_data)
 
 
                 if action == "zoom-in":
@@ -260,19 +292,39 @@ def process_csv(csv_path: Path) -> None:
                     current_lon -= PAN_DEG
                 # 'finish' → leave camera unchanged
                 
-            final_report = generate_commander_report(analyst_history)
-            print("\n=== FINAL COMMANDER REPORT ===")
-            print(final_report)
+            try:
+                final_report = generate_commander_report(analyst_report_strings)
+                print(f"\n=== FINAL COMMANDER REPORT ('{base_name}') ===") # Modified print
+                print(final_report)
+            except Exception as e:
+                print(f"[ERROR] Failed to generate commander report for '{base_name}': {e}", file=sys.stderr)
+                final_report = f"Error generating commander report: {e}" # Store error message
+            # persist this base’s analysis
+            record = {
+                "name":             base_name,
+                "country":          str(row.get("country", "unknown")),
+                "original_coords":  original_coords,
+                "analysts":         parsed_analyst_reports,
+                "commander_report": final_report
+            }
+            all_results = [r for r in all_results if r.get("name") != base_name]
+            all_results.append(record)
+            processed_base_names.add(base_name)
+            try:
+                DATA_FILE.write_text(json.dumps(all_results, indent=2))
+                print(f"[✓] Saved analysis of '{base_name}' to {DATA_FILE}")
+            except Exception as e:
+                print(f"[ERROR] Failed to write results to {DATA_FILE}: {e}", file=sys.stderr)
 
     finally:
         driver.quit()
         
-def generate_commander_report(analyst_history: list[str]) -> str:
+def generate_commander_report(analyst_report_strings: list[str]) -> str:
     """
     Given the 8 analysts' JSON strings, synthesize a final commander report via OpenRouter.
     """
     # 1) Build the combined history block
-    history_block = "\n\n".join(analyst_history)
+    history_block = "\n\n".join(analyst_report_strings)
 
     # 2) Commander‐style system prompt
     commander_prompt = f"""
@@ -303,7 +355,7 @@ Present your answer as a **professional briefing** in **plain text**, using para
         max_tokens=1024,
     )
 
-    print(f"\n[DEBUG] OpenRouter Raw Response for Commander:\n{resp}\n")
+    #print(f"\n[DEBUG] OpenRouter Raw Response for Commander:\n{resp}\n")
     choices = resp.choices
     if not choices or not choices[0].message or not choices[0].message.content:
         raise RuntimeError("Commander LLM returned no content")

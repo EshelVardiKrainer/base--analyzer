@@ -1,18 +1,3 @@
-"""base_analyzer.py
-Automates Google Earth web views of military bases listed in a CSV, captures
-screenshots, rescales them to 1024‑px width, and stores them as JPEGs.
-
-Usage
------
-    # (inside an activated venv)
-    pip install pandas pillow selenium webdriver-manager
-    python base_analyzer.py military_bases.csv
-
-The script expects Google Chrome to be installed locally. webdriver‑manager
-will fetch the correct ChromeDriver automatically. Headless mode is **off** so
-you can watch what happens while debugging.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -21,17 +6,26 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional, Tuple
-
+import os
+from dotenv import load_dotenv
 import pandas as pd
 from PIL import Image
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
 from webdriver_manager.chrome import ChromeDriverManager
+import google.generativeai as genai
+
+load_dotenv()     
+if not os.getenv("GOOGLE_API_KEY"):
+    sys.exit("GOOGLE_API_KEY not set - aborting.")                               
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+MODEL_ID = "gemini-2.0-flash-exp-image-generation"  
+model = genai.GenerativeModel(MODEL_ID)
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-ROWS_TO_PROCESS  = 5      # how many CSV rows to visit
+ROWS_TO_PROCESS  = 1      # how many CSV rows to visit
 ALTITUDE_M       = 10.0   # camera altitude ("a")
 DISTANCE_M       = 1800.0 # camera distance / range ("d")
 TILT_DEG         = 30.0   # camera tilt ("y")
@@ -100,6 +94,19 @@ def safe_print_saved(path: Path) -> None:
         print(f"[✓] Saved {rel}")
     except ValueError:
         print(f"[✓] Saved {path}")
+        
+def gemini_analyze(image_path: Path, country: str) -> str:
+    prompt = (
+        "You are an expert in understanding satellite imagery and you work for the US army. "
+        f"We got intel that this area is a base/facility of the military of {country}. "
+        "Analyze this image, try to find military devices, structures etc and tell me your findings."
+    )
+    with open(image_path, "rb") as img:
+        response = model.generate_content(
+            [prompt, {"mime_type": "image/jpeg", "data": img.read()}]
+        )
+    return response.text.strip()
+
 
 # ---------------------------------------------------------------------------
 # Core logic
@@ -133,6 +140,11 @@ def process_csv(csv_path: Path) -> None:
             driver.save_screenshot(str(png_path))
             jpg_path = resize_to_width(png_path, TARGET_WIDTH_PX)
             safe_print_saved(jpg_path)
+            country = str(row.get("country", "unknown"))
+            print(f"[→] Gemini analysis for {country} …")
+            report = gemini_analyze(jpg_path, country)
+            print("\n----- GEMINI REPORT -----\n" + report + "\n-------------------------\n")
+
     finally:
         driver.quit()
 

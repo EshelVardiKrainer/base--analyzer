@@ -154,35 +154,6 @@ def gemini_analyze(image_path: Path, country: str, forbid_zoomin: bool = False, 
     return response.text.strip()
 
 
-    prompt = (
-        note +
-        "You are an expert in satellite-imagery interpretation working for the US Army.\n\n"
-        "TASK:\n"
-        f"  • You receive a satellite image of a suspected {country} military facility.\n"
-        "  • Respond WITH NOTHING BUT a single, minified JSON object that matches the schema below.\n\n"
-        "SCHEMA:\n"
-        '{'
-        '"findings":[string,...],'
-        '"analysis":string,'
-        '"things_to_continue_analyzing":[string,...],'
-        '"action":"zoom-in"|"zoom-out"|"move-north"|"move-south"|"move-east"|"move-west"|"finish"'
-        '}\n\n'
-        "ACTION GUIDANCE:\n"
-        '  • "zoom-in"  – need finer details;\n'
-        '  • "zoom-out" – need broader context;\n'
-        '  • "move-north/south/east/west" – likely features just outside the current frame;\n'
-        '  • "finish"   – analysis complete.\n\n'
-        "OUTPUT RULES: valid JSON only, double quotes, no markdown or commentary outside the object.\n"
-        "If you believe we are ALREADY at the closest useful zoom, DO NOT ask for 'zoom-in'; choose a different action instead.\n"
-        "DO NOT wrap the JSON in back-ticks or code fences."
-    )
-    
-    with open(image_path, "rb") as img:
-        response = model.generate_content(
-            [prompt, {"mime_type": "image/jpeg", "data": img.read()}]
-        )
-    return response.text.strip()
-
 
 # ---------------------------------------------------------------------------
 # Core logic
